@@ -1,0 +1,57 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ===== 运行时数据（不提交）=====
+data/
+*.xlsx
+*.xls
+*.pdf
+*.caj
+*.part
+*.csv
+*.log
+*.pkl
+
+# 登录态 / 进度 / 缓存
+cnki_cookies.json
+cnki_cookies_title.json
+download_urls.json
+crossref_cache.json
+title_search_progress.json
+title_search_progress.jsonl
+browser_profile/
+browser_profile_title/
+
+# ===== 本地调试产物 =====
+cnki_*.html
+cnki_*.txt
+*.html
+test_download.pdf
+nul
+%USERPROFILE%/
+.claude/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini

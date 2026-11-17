@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Ecp_LoginStuts",
+    "value": "PASTE_YOUR_COOKIE_VALUE_HERE",
+    "domain": ".cnki.net",
+    "path": "/"
+  },
+  {
+    "name": "LID",
+    "value": "PASTE_YOUR_COOKIE_VALUE_HERE",
+    "domain": ".cnki.net",
+    "path": "/"
+  },
+  {
+    "name": "Ecp_session",
+    "value": "1",
+    "domain": ".cnki.net",
+    "path": "/"
+  }
+]
