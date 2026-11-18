@@ -101,7 +101,7 @@ python -X utf8 -u download_corpus_by_title.py --phase search --max-articles 20 -
 再正式检索 + 下载：
 
 ```bash
-python -X utf8 -u download_corpus_by_title.py --phase all --max-articles 500 --captcha-wait 120 --login-wait 300 --retry-failed
+python -X utf8 -u download_corpus_by_title.py --phase all --max-articles 500 --captcha-wait 120 --login-wait 300 --retry-failed --no-annotate
 ```
 
 常用参数：
