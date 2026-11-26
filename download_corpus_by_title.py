@@ -34,7 +34,8 @@
   data/title_search_report.csv        逐篇结果报告（UTF-8 BOM）
   data/pdf_text_check.csv             PDF 文本层检测/OCR 标注
   data/title_search.log               运行日志
-  data/browser_profile_title/         独立浏览器配置与登录态
+  data/browser_profile_edge/          浏览器配置与登录态（默认系统 Edge）
+  data/browser_profile_title/         Chromium 配置（--browser chromium 时用）
 
 下载优先级：
   优先 #pdfDown；没有 PDF 按钮时自动回退 #cajDown（--no-caj-fallback 可关闭）。
@@ -76,6 +77,8 @@ REPORT_FILE = OUTPUT_DIR / "title_search_report.csv"
 LOG_FILE = OUTPUT_DIR / "title_search.log"
 DEBUG_SCREENSHOT = OUTPUT_DIR / "title_search_debug.png"
 PROFILE_DIR = OUTPUT_DIR / "browser_profile_title"
+# Edge 与 Chromium 的 profile 不兼容，使用独立目录避免配置冲突/损坏
+EDGE_PROFILE_DIR = OUTPUT_DIR / "browser_profile_edge"
 COOKIES_FILE = OUTPUT_DIR / "cnki_cookies.json"
 COOKIES_OUT_FILE = OUTPUT_DIR / "cnki_cookies_title.json"
 ANNOTATION_FILE = OUTPUT_DIR / "pdf_text_check.csv"
@@ -110,6 +113,10 @@ RETRYABLE_STATUSES = {
     "no_match", "no_pdf", "captcha", "login_required",
     "detail_mismatch", "detail_404", "search_failed", "failed",
 }
+# --retry-failed 实际会重新处理的状态。默认只重试验证码超时：
+# 这类失败人工过一次滑块就能成功；而 no_match/no_pdf 等再查一遍通常还是同样结果，
+# 重试只是浪费时间，因此不纳入。需要调整时改这一个集合即可。
+RETRY_FAILED_STATUSES = {"captcha"}
 
 # 日志
 logging.basicConfig(
@@ -1511,8 +1518,15 @@ def select_pending_articles(articles, progress, args):
             pending.append(article)
             continue
 
-        if status in RETRYABLE_STATUSES and not args.retry_failed:
-            continue
+        # 失败记录一律保留在进度里并跳过，绝不删除——删除会让它变回
+        # "无记录"状态，被当成新文章在后续每轮重复处理。
+        # 仅当 --retry-failed 且状态属于 RETRY_FAILED_STATUSES（当前仅 captcha）
+        # 时，才把这一批重新入队；其余失败状态（no_match/no_pdf 等）始终跳过。
+        if status in RETRYABLE_STATUSES:
+            if status not in RETRY_FAILED_STATUSES:
+                continue
+            if not args.retry_failed:
+                continue
 
         if status == "matched" and args.phase == "search":
             continue
@@ -1555,12 +1569,13 @@ def run(args):
         init_report(reset=False)
 
     if args.retry_failed:
-        removed = 0
-        for key in list(progress["records"]):
-            if progress["records"][key].get("status") in RETRYABLE_STATUSES:
-                del progress["records"][key]
-                removed += 1
-        log.info(f"--retry-failed：已清除 {removed} 条可重试失败记录")
+        # 只放行 captcha 记录重新入队，不删除任何记录：
+        # 若删除，该篇会变回"无记录"状态，在后续每轮都被当成新文章重复处理。
+        pending_captcha = sum(
+            1 for r in progress["records"].values()
+            if r.get("status") in RETRY_FAILED_STATUSES)
+        log.info(f"--retry-failed：将重试 {pending_captcha} 条 "
+                 f"{sorted(RETRY_FAILED_STATUSES)} 记录（不删除记录；其余失败状态不重试）")
 
     pending = select_pending_articles(no_doi, progress, args)
     save_progress(progress)
@@ -1573,22 +1588,31 @@ def run(args):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        log.error("未安装 playwright，请运行: pip install playwright && playwright install chromium")
+        log.error("未安装 playwright，请运行: pip install playwright（用 Edge 时无需 playwright install）")
         return 2
 
-    ensure_dir(PROFILE_DIR)
+    # 默认用系统 Edge；--browser chromium 可切回 Playwright 自带内核。
+    use_edge = args.browser == "edge"
+    default_profile = EDGE_PROFILE_DIR if use_edge else PROFILE_DIR
+    profile_dir = str(args.profile or default_profile)
+    ensure_dir(profile_dir)
     stats = Counter()
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(args.profile or PROFILE_DIR),
+        launch_kwargs = dict(
+            user_data_dir=profile_dir,
             headless=args.headless,
             viewport={"width": 1400, "height": 950},
             accept_downloads=True,
             args=["--start-maximized"],
         )
+        if use_edge:
+            # channel=msedge 使用系统安装的 Edge，无需 playwright install
+            launch_kwargs["channel"] = "msedge"
+        context = p.chromium.launch_persistent_context(**launch_kwargs)
 
-        log.info(f"浏览器配置: {args.profile or PROFILE_DIR}")
+        log.info(f"浏览器: {'系统 Edge (msedge)' if use_edge else 'Playwright Chromium'}")
+        log.info(f"浏览器配置: {profile_dir}")
         inject_cookies_into_context(context)
 
         downloads = []
@@ -1642,6 +1666,14 @@ def run(args):
                 if i % 20 == 0:
                     save_progress(progress)
                     log.info(f"进度已保存（{i}/{len(pending)}）")
+
+                # 周期性长暂停：降低知网风控概率。最后一篇之后不再暂停。
+                if (args.pause_every > 0 and i % args.pause_every == 0
+                        and i < len(pending)):
+                    save_progress(progress)  # 暂停前落盘，防止中断丢进度
+                    log.info(f"  已处理 {i}/{len(pending)} 条，暂停 "
+                             f"{args.pause_seconds} 秒（定期休息，降低风控）")
+                    time.sleep(args.pause_seconds)
 
                 time.sleep(args.delay + random.uniform(0, 0.8))
 
@@ -1705,6 +1737,10 @@ def build_arg_parser():
                         help="标题相似度阈值（默认0.60）")
     parser.add_argument("--delay", type=float, default=2.0,
                         help="每篇之间基础延迟秒数（默认2.0）")
+    parser.add_argument("--pause-every", type=int, default=50,
+                        help="每处理 N 条长暂停一次（默认50，0=关闭）")
+    parser.add_argument("--pause-seconds", type=int, default=60,
+                        help="长暂停时长秒数（默认60，即1分钟）")
     parser.add_argument("--captcha-wait", type=int, default=30,
                         help="等待人工通过滑块的秒数（默认30，0=不限时）")
     parser.add_argument("--login-wait", type=int, default=300,
@@ -1712,15 +1748,17 @@ def build_arg_parser():
     parser.add_argument("--captcha-cooldown", type=int, default=20,
                         help="出现验证码后冷却秒数（默认20）")
     parser.add_argument("--retry-failed", action="store_true",
-                        help="重试之前失败的记录")
+                        help="重试之前因验证码超时失败的记录（不含 no_match/no_pdf 等）")
     parser.add_argument("--reset", action="store_true",
                         help="清空进度和报告（不删除PDF）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只检索校验，不下载（等价 --phase search）")
     parser.add_argument("--headless", action="store_true",
                         help="无头模式（无法人工过滑块，不推荐）")
+    parser.add_argument("--browser", choices=["edge", "chromium"], default="edge",
+                        help="浏览器内核：edge=系统 Edge（默认），chromium=Playwright 自带")
     parser.add_argument("--profile", type=str, default=None,
-                        help="Playwright 配置目录（默认 data/browser_profile_title）")
+                        help="浏览器配置目录（默认 Edge: data/browser_profile_edge；Chromium: data/browser_profile_title）")
     parser.add_argument("--excel", type=str, default=str(EXCEL_FILE),
                         help="语料 Excel 路径")
     parser.add_argument("--write-cookies", action="store_true",
