@@ -37,6 +37,10 @@
   data/browser_profile_edge/          浏览器配置与登录态（默认系统 Edge）
   data/browser_profile_title/         Chromium 配置（--browser chromium 时用）
 
+检索词处理：
+  标题含 * + - 等特殊符号时自动加半角单引号（如 '…1993-1997年…'）做精确检索，
+  避免被知网当运算符。用 --retry-special 可单独重跑这类此前失败的记录。
+
 下载优先级：
   优先 #pdfDown；没有 PDF 按钮时自动回退 #cajDown（--no-caj-fallback 可关闭）。
   CAJ 文件会保存为 .caj，并在标注里记为 pdf_type=caj。
@@ -117,6 +121,11 @@ RETRYABLE_STATUSES = {
 # 这类失败人工过一次滑块就能成功；而 no_match/no_pdf 等再查一遍通常还是同样结果，
 # 重试只是浪费时间，因此不纳入。需要调整时改这一个集合即可。
 RETRY_FAILED_STATUSES = {"captcha"}
+# 检索词含这些符号时知网会当作检索运算符（如 - 被当成"非"），需用半角单引号
+# 把整个标题包起来做精确检索，否则会 no_match / search_failed。
+QUOTE_TRIGGER_CHARS = set("*+-")
+# --retry-special 重跑的状态：含特殊符号且此前因之失败的记录
+SPECIAL_FAILED_STATUSES = {"no_match", "search_failed", "no_pdf", "failed"}
 
 # 日志
 logging.basicConfig(
@@ -580,6 +589,22 @@ def build_report_row(article, status, best=None, score=0.0, checks=None,
 # ===== 标题/元数据匹配 =====
 def normalize_title(s):
     return re.sub(r"[^\w\u4e00-\u9fff]", "", str(s)).lower()
+
+
+def needs_quote(title):
+    """标题含 * + - 等特殊符号时需加引号（这些符号会被知网当检索运算符）。"""
+    return any(c in (title or "") for c in QUOTE_TRIGGER_CHARS)
+
+
+def build_search_query(title):
+    """构造检索词：含特殊符号时用半角单引号包裹，避免被知网当作运算符。
+
+    例：腐败大案多发生在1993-1997年 -> '腐败大案多发生在1993-1997年'
+    """
+    t = (title or "").strip()
+    if t and needs_quote(t):
+        return f"'{t}'"
+    return t
 
 
 def title_score(query, candidate):
@@ -1405,7 +1430,10 @@ def process_article_all(context, search_page, downloads, article, args, progress
             file=existing.name, message="already_exists")
         return rec, None
 
-    rows, err = search_rows(search_page, article["title"], args)
+    query = build_search_query(article["title"])
+    if query != article["title"]:
+        log.info(f"  检索词含特殊符号，加单引号: {query}")
+    rows, err = search_rows(search_page, query, args)
     if err:
         status = {"captcha": "captcha", "login": "login_required"}.get(
             err, "search_failed")
@@ -1522,6 +1550,15 @@ def select_pending_articles(articles, progress, args):
         # "无记录"状态，被当成新文章在后续每轮重复处理。
         # 仅当 --retry-failed 且状态属于 RETRY_FAILED_STATUSES（当前仅 captcha）
         # 时，才把这一批重新入队；其余失败状态（no_match/no_pdf 等）始终跳过。
+        # --retry-special：只放行"标题含特殊符号且此前失败"的记录，
+        # 用新加的单引号规则重新检索；不影响其它失败记录的跳过策略。
+        is_special_failed = (
+            needs_quote(article["title"])
+            and status in SPECIAL_FAILED_STATUSES)
+        if args.retry_special and is_special_failed:
+            pending.append(article)
+            continue
+
         if status in RETRYABLE_STATUSES:
             if status not in RETRY_FAILED_STATUSES:
                 continue
@@ -1576,6 +1613,15 @@ def run(args):
             if r.get("status") in RETRY_FAILED_STATUSES)
         log.info(f"--retry-failed：将重试 {pending_captcha} 条 "
                  f"{sorted(RETRY_FAILED_STATUSES)} 记录（不删除记录；其余失败状态不重试）")
+
+    if args.retry_special:
+        pending_special = sum(
+            1 for a in no_doi
+            if needs_quote(a["title"])
+            and (progress["records"].get(a["key"]) or {}).get("status")
+            in SPECIAL_FAILED_STATUSES)
+        log.info(f"--retry-special：将重跑 {pending_special} 条含特殊符号的失败记录"
+                 f"（单引号精确检索）")
 
     pending = select_pending_articles(no_doi, progress, args)
     save_progress(progress)
@@ -1749,6 +1795,8 @@ def build_arg_parser():
                         help="出现验证码后冷却秒数（默认20）")
     parser.add_argument("--retry-failed", action="store_true",
                         help="重试之前因验证码超时失败的记录（不含 no_match/no_pdf 等）")
+    parser.add_argument("--retry-special", action="store_true",
+                        help="单独重跑标题含 * + - 等特殊符号且此前失败的记录（用单引号精确检索）")
     parser.add_argument("--reset", action="store_true",
                         help="清空进度和报告（不删除PDF）")
     parser.add_argument("--dry-run", action="store_true",
